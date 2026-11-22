@@ -195,14 +195,14 @@ class App():
         except Exception as e:
             return f"Error: {e}"
 
-    async def get_recipe_from_photo(self, arguments_json):
+    async def get_recipe_from_photo(self, image_input):
         self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
         await self.client.connect()
 
-        args = json.loads(arguments_json) if arguments_json else {}
+        args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 3}
         chromadb_result = await self.client.call_tool(
             "retrieve_images_by_image",
-            args #{"chromadb_dir": "chroma_multimodal", "query_image_path": "./query_image.jpeg", "k": 3}
+            args
         )
 
         output_recipe = ""
@@ -232,6 +232,23 @@ class App():
             """)
 
             with gr.Tabs():
+                with gr.Tab("Multimodal Chatbot"):
+                    gr.Markdown("Upload a photo of a dish to get a step-by-step recipe.")
+                    with gr.Row():
+                        with gr.Column():
+                            image_input = gr.Image(
+                                label="Dish photo",
+                                type="filepath",          # handler receives a path string (or None)
+                                sources=["upload", "clipboard", "webcam"],
+                            )
+                            call_tool_btn = gr.Button("Send image", variant="primary")
+                        with gr.Column():
+                            tool_result = gr.Textbox(label="Step-by-step recipe", lines=12)
+                    call_tool_btn.click(
+                        fn=self.get_recipe_from_photo,
+                        inputs=[image_input],
+                        outputs=tool_result,
+                    )
                 with gr.Tab("Agentic workflow"):
                     gr.Markdown("Instructions to replicate your image.")
                     with gr.Row():
@@ -243,7 +260,6 @@ class App():
                             )
                             call_tool_btn = gr.Button("Send image", variant="primary")
                             tool_result = gr.Textbox(label="Step-by-step recipe", lines=8)
-
                     call_tool_btn.click(
                         fn=self.get_recipe_from_photo,
                         inputs=[tool_args],
@@ -359,6 +375,7 @@ def main():
 # Beginning of execution
 # ==========================================================================================================
 
+"""
 async def main():
     b64 = encode_image("../Data/query_image.jpeg")
 
@@ -378,12 +395,12 @@ async def main():
 
             # Newer SDK versions populate structuredContent; otherwise parse the text blocks
             print(result.structuredContent or [c.text for c in result.content])
-
+"""
 
 def main():
     if len(sys.argv) < 3:
         print("Usage: python mcp_http_client_app.py <server_url> <roots_dir>")
-        print("Example: python mcp_http_client_app.py http://127.0.0.1:8080 /path/to/workspace")
+        print("Example: python host_app.py http://127.0.0.1:8080 ./")
         sys.exit(1)
 
     server_url = sys.argv[1]
