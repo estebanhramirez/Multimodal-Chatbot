@@ -195,24 +195,21 @@ class App():
         except Exception as e:
             return f"Error: {e}"
 
-    async def get_recipe_from_photo(self, image_input):
+    async def process_user_request(self, user_prompt, image_input):
         self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
         await self.client.connect()
 
-        args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 3}
+        args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 1}
         chromadb_result = await self.client.call_tool(
             "retrieve_images_by_image",
             args
         )
-
         output_recipe = ""
         for content in chromadb_result.content:
             if hasattr(content, 'text'):
                 output_recipe += content.text + "\n"
 
-        user_prompt = f"""
-            Provide step-by-step instructions to complete the following recipe: {output_recipe}
-        """
+        user_prompt = f"The recipe queries was {output_recipe}. {user_prompt}"
         llm_result = call_llm(user_prompt=user_prompt)
 
         return (llm_result)
@@ -244,26 +241,16 @@ class App():
                             call_tool_btn = gr.Button("Send image", variant="primary")
                         with gr.Column():
                             tool_result = gr.Textbox(label="Step-by-step recipe", lines=12)
-                    call_tool_btn.click(
-                        fn=self.get_recipe_from_photo,
-                        inputs=[image_input],
-                        outputs=tool_result,
-                    )
-                with gr.Tab("Agentic workflow"):
-                    gr.Markdown("Instructions to replicate your image.")
-                    with gr.Row():
                         with gr.Column():
-                            tool_args = gr.Textbox(
-                                label="Arguments (JSON)",
-                                placeholder='{"filepath": "test.txt"}',
+                            user_prompt = gr.Textbox(
+                                label="User prompt",
+                                placeholder="Describe what's in the image and tell when America was discovered.",
                                 lines=3
                             )
-                            call_tool_btn = gr.Button("Send image", variant="primary")
-                            tool_result = gr.Textbox(label="Step-by-step recipe", lines=8)
                     call_tool_btn.click(
-                        fn=self.get_recipe_from_photo,
-                        inputs=[tool_args],
-                        outputs=tool_result
+                        fn=self.process_user_request,
+                        inputs=[user_prompt, image_input],
+                        outputs=tool_result,
                     )
                 with gr.Tab("Tools"):
                     gr.Markdown("### Discover and Execute Server Tools")
