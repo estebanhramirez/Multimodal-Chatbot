@@ -24,19 +24,6 @@ from PIL import Image
 
 
 # ==========================================================================================================
-# Helper functions
-# ==========================================================================================================
-
-def encode_image(path: str, max_side: int = 512) -> str:
-    img = Image.open(path).convert("RGB")
-    img.thumbnail((max_side, max_side)) # downscale; CLIP resizes to 224 anyway
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=90)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-
-# ==========================================================================================================
 # Application
 # ==========================================================================================================
 
