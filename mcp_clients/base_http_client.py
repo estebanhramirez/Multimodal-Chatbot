@@ -58,7 +58,6 @@ class MCPHTTPClient:
         return self._tools_cache
 
     async def call_tool(self, tool_name: str, arguments: dict):
-        print(tool_name, arguments)
         result = await self.session.call_tool(tool_name, arguments)
         return result
 

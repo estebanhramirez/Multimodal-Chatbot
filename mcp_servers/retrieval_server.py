@@ -86,34 +86,27 @@ server = FastMCP(name="Retrieval_server", instructions="Server for retrieval of 
 # --------------------------------------------- MCP tools -----------------------------------------------------
  
 @server.tool()
-def retrieve_images_by_image(chromadb_dir: str, query_image: str, k: int = 5, where: dict | None = None):
+def retrieve_recipe_from_image(query_image: str):
     """
-    Retrieve similar images from the image database based on a query image,
-    with optional metadata filtering.
+    Retrieve recipe details based on a query image (with optional metadata filtering).
 
     Args:
-        chromadb_dir (str): the path to the database.
-        query_image (str): the query image, encoded as a base64 string.
-        k (int): the number of top results to return.
-        where (dict | None): Optional metadata filter, e.g. {"cuisine": "Italian"}.
+        query_image (str): the query image.
     Returns:
         Tuple[List]: ids, docs, metas, dists
     """
-    print("DEBUGGING HERE!")
-    print(chromadb_dir)
 
     chromadb = Chroma(
         collection_name="food_images",
-        persist_directory=chromadb_dir,
+        persist_directory="../chroma_multimodal",
     )
 
-    img = _decode_image(query_image)
-    q_vec = embed_images([img])[0]  # 512-d, cosine-ready
+    q_vec = embed_images([query_image])[0]  # 512-d, cosine-ready
 
     res = chromadb._collection.query(
         query_embeddings=[q_vec.tolist()],
-        n_results=k,
-        where=where,
+        n_results=1,
+        where=None,
         include=["documents", "metadatas", "distances"],
     )
     return (_unwrap(res))

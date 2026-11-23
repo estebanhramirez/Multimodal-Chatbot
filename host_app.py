@@ -57,7 +57,7 @@ class App():
     # MCP Host — ReAct Agent Loop
     async def chat_with_agent(self, user_message: str, history: list) -> str:
         mcp_tools = await self.client.list_tools()
-
+        print(mcp_tools)
         # Convert MCP tool schemas to OpenAI-style tool definitions for the LLM
         openai_tools = [
             {
@@ -117,44 +117,27 @@ class App():
         if not user_message or not user_message.strip():
             yield history
             return
-        # Show a thinking placeholder while the agent runs
+
         history = history + [
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": "Thinking..."},
         ]
         yield history
 
-        response_text = await self.chat_with_agent(user_message, history[:-2])
-        print(f"--------> RESPONSE TEXT -------> |{history}|")
-        history[-1] = {"role": "assistant", "content": response_text}
+        response_text = await self.chat_with_agent(user_message, history)
+        history = history + [{"role": "assistant", "content": response_text}]
         yield history
 
-    async def process_user_request(self, user_input, history, image_input):
-        user_message = user_input
-
+    async def process_user_request(self, user_message, history, image_input):
         if image_input:
-            print(f"Image input FOUND -------> {image_input}")
-            args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 1}
-            chromadb_result = await self.client.call_tool("retrieve_images_by_image", args)
-            print(f"Retrieval result: {chromadb_result}")
-            output_recipe = ""
-            for content in chromadb_result.content:
-                if hasattr(content, 'text'):
-                    output_recipe += content.text + "\n"
-
-            # Make this a system message later
-            prompt_augmentation = f"The user input an Image and the retrieved recipe was: {output_recipe}"
-        else:
-            prompt_augmentation = ""
-
-        user_message += prompt_augmentation
+            history = history + [
+                {"role": "user", "content": f"The user input the Image: {image_input}"},
+            ]
 
         async for update in self.handle_chat(user_message, history):
             yield update
 
-
     async def create_interface(self):
-        """Create the Gradio interface."""
         self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
         await self.client.connect()
 
@@ -201,15 +184,14 @@ class App():
 # ==========================================================================================================
 
 async def main():
-    if len(sys.argv) < 3:
-        ...
     host_app = App(server_url=sys.argv[1], roots_dir=sys.argv[2])
     interface = await host_app.create_interface()
 
     app = gr.mount_gradio_app(FastAPI(), interface, path="/")
     config = uvicorn.Config(app, host="127.0.0.1", port=7861, log_level="info")
+
     try:
-        await uvicorn.Server(config).serve()   # runs in loop A, doesn't block it
+        await uvicorn.Server(config).serve() # runs in loop A, doesn't block it
     finally:
         await host_app.client.cleanup()
 
