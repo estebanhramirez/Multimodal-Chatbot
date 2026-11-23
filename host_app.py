@@ -9,8 +9,13 @@ import sys
 import json
 import gradio as gr
 import requests
+import time
+import uvicorn
 
 
+from fastapi import FastAPI
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_ollama import ChatOllama
 from mcp_clients.base_http_client import MCPHTTPClient
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -24,64 +29,11 @@ from PIL import Image
 
 def encode_image(path: str, max_side: int = 512) -> str:
     img = Image.open(path).convert("RGB")
-    img.thumbnail((max_side, max_side))          # downscale; CLIP resizes to 224 anyway
+    img.thumbnail((max_side, max_side)) # downscale; CLIP resizes to 224 anyway
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
-
-def unwrap_response(response):
-    """
-    Function to unwrap the response from the Ollama server and extract the content from the streamed JSON lines.
-
-    Args:
-        response (requests.Response): The response object from the Ollama server.
-    Returns:
-        str: The final response content extracted from the streamed JSON lines.
-    """
-
-    if response.status_code == 200:
-        final_response = ""
-        for line in response.iter_lines(decode_unicode=True):
-            if line:
-                try:
-                    json_data = json.loads(line)
-                    if "message" in json_data and "content" in json_data["message"]:
-                        content = json_data["message"]["content"]
-                        final_response += content
-                except json.JSONDecodeError:
-                    print(f"Error decoding JSON from line: {line}")
-        return(final_response)
-    else:
-        return(f"Request failed with status code: {response.status_code}")
-
-
-# Textual LLM
-def call_llm(user_prompt: str) -> str:
-    """
-        Function to send a model execution request to the Ollama server running locally through port 11434,
-        and receive and stream the response from the model.
-    
-        Args:
-            system_msg (str): The system message to provide context for the LLM.
-            user_prompt (str): The user prompt containing the task and input data.
-    
-        Returns:
-            str: The final response from the LLM after processing the input.
-    """
-
-    url = "http://127.0.0.1:11434/api/chat"
-
-    payload = {
-        "model": "phi4-mini:3.8b",
-        "messages": [ 
-            {"role": "user", "content": user_prompt}
-            ]
-    }
-
-    response = requests.post(url, json=payload, stream=True)
-
-    return unwrap_response(response)
 
 
 # ==========================================================================================================
@@ -98,125 +50,115 @@ class App():
         self.tools_cache = []
         self.prompts_cache = []
 
-        self.client = None # For lazy initialization
+        self.client = None
 
-    async def gui_list_tools(self):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
+        self.llm = ChatOllama(model="phi4-mini:3.8b", base_url="http://127.0.0.1:11434")
 
-        tools = await self.client.list_tools()
-        self.tools_cache = [(t.name, f"{t.name}: {t.description}") for t in tools]
-        output = "\n".join([f"• {t.name}: {t.description}" for t in tools])
-        choices = [t.name for t in tools]
-        return output, gr.update(choices=choices)
+    # MCP Host — ReAct Agent Loop
+    async def chat_with_agent(self, user_message: str, history: list) -> str:
+        mcp_tools = await self.client.list_tools()
 
-    async def gui_call_tool(self, tool_name, arguments_json):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
+        # Convert MCP tool schemas to OpenAI-style tool definitions for the LLM
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description or "",
+                    "parameters": t.inputSchema,
+                },
+            }
+            for t in mcp_tools
+        ]
 
-        if not tool_name:
-            return "Error: Please select a tool from the dropdown first"
-        try:
-            args = json.loads(arguments_json) if arguments_json else {}
-            result = await self.client.call_tool(tool_name, args)
-            output = ""
-            for content in result.content:
+        model = self.llm.bind_tools(openai_tools)
+
+        # Build the message list from chat history and the new user message
+        messages = []
+        for msg in history:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "user" and content:
+                messages.append(HumanMessage(content=content))
+            elif role == "assistant" and content:
+                messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=user_message))
+
+        # ReAct loop — call tools until the LLM returns a plain text reply
+        for _ in range(10):
+            response = await model.ainvoke(messages)
+            messages.append(response)
+
+            # No tool calls means the LLM is done — return the final response
+            if not response.tool_calls:
+                raw = response.content
+                if isinstance(raw, list):
+                    return " ".join(
+                        b.get("text", "") if isinstance(b, dict) else str(b)
+                        for b in raw
+                    )
+                return str(raw)
+
+            # Execute each tool call via the MCP server and feed results back
+            for tool_call in response.tool_calls:
+                result = await self.client.call_tool(tool_call["name"], tool_call["args"])
+                tool_output = " ".join(
+                    item.text if hasattr(item, "text") else str(item)
+                    for item in result.content
+                ) if result.content else "(no result)"
+                messages.append(ToolMessage(content=tool_output, tool_call_id=tool_call["id"]))
+
+        return ("I wasn't able to complete that request. Please try again.")
+
+
+    async def handle_chat(self, user_message, history):
+        if history is None:
+            history = []
+        if not user_message or not user_message.strip():
+            yield history
+            return
+        # Show a thinking placeholder while the agent runs
+        history = history + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": "Thinking..."},
+        ]
+        yield history
+
+        response_text = await self.chat_with_agent(user_message, history[:-2])
+        print(f"--------> RESPONSE TEXT -------> |{history}|")
+        history[-1] = {"role": "assistant", "content": response_text}
+        yield history
+
+    async def process_user_request(self, user_input, history, image_input):
+        user_message = user_input
+
+        if image_input:
+            print(f"Image input FOUND -------> {image_input}")
+            args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 1}
+            chromadb_result = await self.client.call_tool("retrieve_images_by_image", args)
+            print(f"Retrieval result: {chromadb_result}")
+            output_recipe = ""
+            for content in chromadb_result.content:
                 if hasattr(content, 'text'):
-                    output += content.text + "\n"
-            return output if output else "No response"
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON format"
-        except Exception as e:
-            return f"Error: {e}"
+                    output_recipe += content.text + "\n"
 
-    async def gui_list_resources(self):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
-        
-        resources = await self.client.list_resources()
-        if resources:
-            output = []
-            for r in resources:
-                name = getattr(r, 'name', getattr(r, 'description', 'Unnamed resource'))
-                uri_template = getattr(r, 'uriTemplate', getattr(r, 'uri', 'N/A'))
-                output.append(f"• {name}\n  URI template: {uri_template}")
-            return "\n\n".join(output)
-        return "No resources available"
+            # Make this a system message later
+            prompt_augmentation = f"The user input an Image and the retrieved recipe was: {output_recipe}"
+        else:
+            prompt_augmentation = ""
 
-    async def gui_read_resource(self, uri):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
-        
-        if not uri:
-            return "Error: Please enter a resource URI"
-        try:
-            result = await self.client.read_resource(uri)
-            output = ""
-            for content in result.contents:
-                if hasattr(content, 'text'):
-                    output += content.text + "\n"
-            return output if output else "No content"
-        except Exception as e:
-            return f"Error: {e}"
+        user_message += prompt_augmentation
 
-    async def gui_list_prompts(self):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
-
-        prompts = await self.client.list_prompts()
-        self.prompts_cache = prompts
-        output = []
-        choices = []
-        for p in prompts:
-            args_info = ""
-            if p.arguments:
-                arg_names = [arg.name for arg in p.arguments]
-                args_info = f" (args: {', '.join(arg_names)})"
-            output.append(f"• {p.name}: {p.description}{args_info}")
-            choices.append(p.name)
-        return "\n".join(output), gr.update(choices=choices)
-
-    async def gui_get_prompt(self, prompt_name, arguments_json):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
-
-        if not prompt_name:
-            return "Error: Please select a prompt from the dropdown first"
-        try:
-            args = json.loads(arguments_json) if arguments_json else {}
-            result = await self.client.get_prompt(prompt_name, args)
-            output = f"--- Prompt: {result.description} ---\n\n"
-            for msg in result.messages:
-                content_text = msg.content.text if hasattr(msg.content, 'text') else msg.content.get('text', '')
-                output += f"{msg.role}: {content_text}\n"
-            return output
-        except json.JSONDecodeError:
-            return "Error: Invalid JSON format"
-        except Exception as e:
-            return f"Error: {e}"
-
-    async def process_user_request(self, user_prompt, image_input):
-        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
-        await self.client.connect()
-
-        args = {"chromadb_dir": "../chroma_multimodal", "query_image": encode_image(image_input), "k": 1}
-        chromadb_result = await self.client.call_tool(
-            "retrieve_images_by_image",
-            args
-        )
-        output_recipe = ""
-        for content in chromadb_result.content:
-            if hasattr(content, 'text'):
-                output_recipe += content.text + "\n"
-
-        user_prompt = f"The recipe queries was {output_recipe}. {user_prompt}"
-        llm_result = call_llm(user_prompt=user_prompt)
-
-        return (llm_result)
+        async for update in self.handle_chat(user_message, history):
+            yield update
 
 
-    def create_interface(self):
+    async def create_interface(self):
         """Create the Gradio interface."""
+        self.client = MCPHTTPClient(server_url=self.server_url, roots_dir=self.roots_dir)
+        await self.client.connect()
+
+        self.tools_cache = await self.client.list_tools()
 
         with gr.Blocks(title="MCP HTTP Client") as interface:
             gr.Markdown("# MCP HTTP Client - Remote Server Access")
@@ -229,113 +171,28 @@ class App():
             """)
 
             with gr.Tabs():
-                with gr.Tab("Multimodal Chatbot"):
-                    gr.Markdown("Upload a photo of a dish to get a step-by-step recipe.")
+                with gr.Tab("Chat"):
+                    chatbot = gr.Chatbot(height=500)
+                    msg_input = gr.Textbox(
+                        label="Ask about restaurants",
+                        placeholder='e.g., "Find me a moody spot in DTLA" or "Tell me about Sakura Garden"',
+                    )
+
                     with gr.Row():
                         with gr.Column():
                             image_input = gr.Image(
                                 label="Dish photo",
-                                type="filepath",          # handler receives a path string (or None)
+                                type="filepath",
                                 sources=["upload", "clipboard", "webcam"],
                             )
-                            call_tool_btn = gr.Button("Send image", variant="primary")
-                        with gr.Column():
-                            tool_result = gr.Textbox(label="Step-by-step recipe", lines=12)
-                        with gr.Column():
-                            user_prompt = gr.Textbox(
-                                label="User prompt",
-                                placeholder="Describe what's in the image and tell when America was discovered.",
-                                lines=3
-                            )
-                    call_tool_btn.click(
-                        fn=self.process_user_request,
-                        inputs=[user_prompt, image_input],
-                        outputs=tool_result,
-                    )
-                with gr.Tab("Tools"):
-                    gr.Markdown("### Discover and Execute Server Tools")
-                    with gr.Row():
-                        with gr.Column():
-                            list_tools_btn = gr.Button("List Tools", variant="primary")
-                            tools_output = gr.Textbox(label="Available Tools", lines=5)
 
-                        with gr.Column():
-                            tool_dropdown = gr.Dropdown(label="Select Tool", choices=[], interactive=True)
-                            tool_args = gr.Textbox(
-                                label="Arguments (JSON)",
-                                placeholder='{"filepath": "test.txt"}',
-                                lines=3
-                            )
-                            call_tool_btn = gr.Button("Call Tool", variant="primary")
-                            tool_result = gr.Textbox(label="Tool Result", lines=8)
+                    msg_input.submit(
+                        self.process_user_request,
+                        inputs=[msg_input, chatbot, image_input],
+                        outputs=[chatbot],
+                    ).then(lambda: ("", None), None, [msg_input, image_input])
 
-                    list_tools_btn.click(
-                        fn=self.gui_list_tools,
-                        outputs=[tools_output, tool_dropdown]
-                    )
-
-                    call_tool_btn.click(
-                        fn=self.gui_call_tool,
-                        inputs=[tool_dropdown, tool_args],
-                        outputs=tool_result
-                    )
-
-                with gr.Tab("Resources"):
-                    gr.Markdown("### Access Server Resources")
-                    with gr.Row():
-                        with gr.Column():
-                            list_resources_btn = gr.Button("List Resource Templates", variant="primary")
-                            resources_output = gr.Textbox(label="Available Resources", lines=5)
-
-                        with gr.Column():
-                            resource_uri = gr.Textbox(
-                                label="Resource URI",
-                                placeholder="file://workspace/README.md",
-                                lines=1
-                            )
-                            read_resource_btn = gr.Button("Read Resource", variant="primary")
-                            resource_content = gr.Textbox(label="Resource Content", lines=10)
-
-                    list_resources_btn.click(
-                        fn=self.gui_list_resources,
-                        outputs=resources_output
-                    )
-
-                    read_resource_btn.click(
-                        fn=self.gui_read_resource,
-                        inputs=resource_uri,
-                        outputs=resource_content
-                    )
-
-                with gr.Tab("Prompts"):
-                    gr.Markdown("### List and Get Prompts")
-                    with gr.Row():
-                        with gr.Column():
-                            list_prompts_btn = gr.Button("List Prompts", variant="primary")
-                            prompts_output = gr.Textbox(label="Available Prompts", lines=5)
-
-                        with gr.Column():
-                            prompt_dropdown = gr.Dropdown(label="Select Prompt", choices=[], interactive=True)
-                            prompt_args = gr.Textbox(
-                                label="Arguments (JSON)",
-                                placeholder='{"filename": "example.py"}',
-                                lines=2
-                            )
-                            get_prompt_btn = gr.Button("Get Prompt", variant="primary")
-                            prompt_result = gr.Textbox(label="Prompt Messages", lines=10)
-
-                    list_prompts_btn.click(
-                        fn=self.gui_list_prompts,
-                        outputs=[prompts_output, prompt_dropdown]
-                    )
-
-                    get_prompt_btn.click(
-                        fn=self.gui_get_prompt,
-                        inputs=[prompt_dropdown, prompt_args],
-                        outputs=prompt_result
-                    )
-
-        return interface
+        return (interface)
 
 
 
@@ -343,60 +200,17 @@ class App():
 # Beginning of execution
 # ==========================================================================================================
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python mcp_http_client_app.py <server_url> <roots_dir>")
-        print("Example: python mcp_http_client_app.py http://127.0.0.1:8080 /path/to/workspace")
-        sys.exit(1)
-
-    server_url = sys.argv[1]
-    roots_dir = sys.argv[2]
-
-    client = App(server_url, roots_dir)
-    interface = client.create_interface()
-    interface.queue().launch(server_name="127.0.0.1", server_port=7861)
-
-
-
-# ==========================================================================================================
-# Beginning of execution
-# ==========================================================================================================
-
-"""
 async def main():
-    b64 = encode_image("../Data/query_image.jpeg")
-
-    async with streamablehttp_client("http://localhost:8080/mcp") as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-
-            result = await session.call_tool(
-                "retrieve_images_by_image",
-                {
-                    "chromadb_dir": "../chroma_multimodal",
-                    "query_image": b64,
-                    "k": 2,
-                    #"where": {"cuisine": "Italian"},   # optional
-                },
-            )
-
-            # Newer SDK versions populate structuredContent; otherwise parse the text blocks
-            print(result.structuredContent or [c.text for c in result.content])
-"""
-
-def main():
     if len(sys.argv) < 3:
-        print("Usage: python mcp_http_client_app.py <server_url> <roots_dir>")
-        print("Example: python host_app.py http://127.0.0.1:8080 ./")
-        sys.exit(1)
+        ...
+    host_app = App(server_url=sys.argv[1], roots_dir=sys.argv[2])
+    interface = await host_app.create_interface()
 
-    server_url = sys.argv[1]
-    roots_dir = sys.argv[2]
-
-    client = App(server_url, roots_dir)
-    interface = client.create_interface()
-    interface.queue().launch(server_name="127.0.0.1", server_port=7861)
-
-
+    app = gr.mount_gradio_app(FastAPI(), interface, path="/")
+    config = uvicorn.Config(app, host="127.0.0.1", port=7861, log_level="info")
+    try:
+        await uvicorn.Server(config).serve()   # runs in loop A, doesn't block it
+    finally:
+        await host_app.client.cleanup()
 
 asyncio.run(main())

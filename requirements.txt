@@ -14,8 +14,9 @@ ibm-watsonx-ai==1.4.7
 langchain
 langchain-community==0.3.31
 langchain-chroma==0.2.6
-langchain-ibm==1.0.4
 langchain-core==1.2.18
+langchain-ibm==1.0.4
+langchain-ollama
 
 matplotlib==3.10.7
 

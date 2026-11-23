@@ -84,7 +84,7 @@ def _decode_image(query_image: str) -> Image.Image:
 server = FastMCP(name="Retrieval_server", instructions="Server for retrieval of restaurants and recipes.")
 
 # --------------------------------------------- MCP tools -----------------------------------------------------
-
+ 
 @server.tool()
 def retrieve_images_by_image(chromadb_dir: str, query_image: str, k: int = 5, where: dict | None = None):
     """
@@ -99,6 +99,9 @@ def retrieve_images_by_image(chromadb_dir: str, query_image: str, k: int = 5, wh
     Returns:
         Tuple[List]: ids, docs, metas, dists
     """
+    print("DEBUGGING HERE!")
+    print(chromadb_dir)
+
     chromadb = Chroma(
         collection_name="food_images",
         persist_directory=chromadb_dir,

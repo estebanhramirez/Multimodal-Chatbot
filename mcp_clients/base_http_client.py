@@ -31,6 +31,7 @@ class MCPHTTPClient:
         self.session = None
         self.exit_stack = AsyncExitStack()
         self._connected = False
+        self._tools_cache = None
 
     # MCP Handshake method
     async def connect(self):
@@ -51,10 +52,13 @@ class MCPHTTPClient:
 
     # MCP Tools methods
     async def list_tools(self):
-        result = await self.session.list_tools()
-        return result.tools
+        if self._tools_cache is None:
+            result = await self.session.list_tools()
+            self._tools_cache = result.tools
+        return self._tools_cache
 
     async def call_tool(self, tool_name: str, arguments: dict):
+        print(tool_name, arguments)
         result = await self.session.call_tool(tool_name, arguments)
         return result
 
