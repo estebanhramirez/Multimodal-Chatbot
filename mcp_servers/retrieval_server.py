@@ -2,16 +2,14 @@
 # Imports
 # ==========================================================================================================
 
-import base64
-import io
 import torch
-import re
 
 import numpy as np
 
 from fastmcp import FastMCP
 from langchain_chroma import Chroma
 from PIL import Image
+from sentence_transformers import SentenceTransformer
 from transformers import CLIPModel, CLIPProcessor
 
 
@@ -20,9 +18,18 @@ from transformers import CLIPModel, CLIPProcessor
 # Helper functions
 # ==========================================================================================================
 
+def embed_texts(texts, batch_size=64):
+    text_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return text_model.encode(
+        texts,
+        batch_size=batch_size,
+        show_progress_bar=False,
+        normalize_embeddings=True,  # cosine-ready
+    ).astype(np.float32)
+
+
 @torch.no_grad()
 def embed_images(images, batch_size=16):
-    """images: list of file paths (str / Path) and/or PIL.Image objects."""
     device = "cpu"
     clip_name = "openai/clip-vit-base-patch32"
     clip_model = CLIPModel.from_pretrained(clip_name).to(device)
@@ -47,31 +54,11 @@ def embed_images(images, batch_size=16):
 
 
 def _unwrap(res: dict):
-    """
-        Parse the output of Chromadb.retrieve:
-        Chroma returns lists-of-lists; unwrap the first query.
-
-        Args:
-            res (dict): raw result from invoking Chromadb.retrieve()
-        Returns:
-            Tuple[List]: ids, docs, metas, dists
-    """
     ids = res.get("ids", [[]])[0]
     docs = res.get("documents", [[]])[0]
     metas = res.get("metadatas", [[]])[0]
     dists = res.get("distances", [[]])[0]
     return (ids, docs, metas, dists)
-
-
-def _decode_image(query_image: str) -> Image.Image:
-    """Decode a base64 string (optionally a data URL) into an RGB PIL image."""
-    # Strip a possible "data:image/png;base64," prefix
-    query_image = re.sub(r"^data:image/[^;]+;base64,", "", query_image)
-    try:
-        img_bytes = base64.b64decode(query_image, validate=True)
-        return Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    except Exception as e:
-        raise ValueError(f"query_image is not a valid base64-encoded image: {e}")
 
 
 
@@ -84,7 +71,74 @@ def _decode_image(query_image: str) -> Image.Image:
 server = FastMCP(name="Retrieval_server", instructions="Server for retrieval of restaurants and recipes.")
 
 # --------------------------------------------- MCP tools -----------------------------------------------------
- 
+
+@server.tool()
+def retrieve_user_reviews(query: str):
+    """
+    Search customer reviews of restaurants by meaning and return the most relevant ones.
+
+    Use this tool when the user wants first-hand opinions or experiences: what
+    diners thought of a place or dish, service quality, atmosphere, prices, or
+    complaints and praise. For editorial articles, guides, or general
+    recommendations, use retrieve_articles instead.
+
+    Args:
+        query: Natural-language search text describing what to look for,
+            e.g. "slow service and long waits" or "is the carbonara good".
+
+    Returns:
+        A dict with parallel lists: "ids", "documents", "metadatas", "distances". Lower distance means more similar.
+    """
+
+    chromadb = Chroma(
+        collection_name="user_reviews",
+        persist_directory="../chroma_multimodal",
+    )
+
+    q_vec = embed_texts([query])[0]  # 384-d, cosine-ready
+
+    res = chromadb._collection.query(
+        query_embeddings=[q_vec.tolist()],
+        n_results=2,
+        where=None,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    return (_unwrap(res))
+
+
+@server.tool()
+def find_restaurants(query: str):
+    """
+    Search restaurant articles by meaning and return the most relevant ones.
+
+    Use this tool whenever the user asks about restaurants, cuisines, dishes,
+    reviews, or dining recommendations that articles in the database might cover.
+
+    Args:
+        query: Natural-language search text, e.g. "best ramen in Tokyo".
+
+    Returns:
+        A dict with parallel lists: "ids", "documents", "metadatas", "distances". Lower distance means more similar.
+    """
+
+    chromadb = Chroma(
+        collection_name="restaurant_articles",
+        persist_directory="../chroma_multimodal",
+    )
+
+    q_vec = embed_texts([query])[0]  # 384-d, cosine-ready
+
+    res = chromadb._collection.query(
+        query_embeddings=[q_vec.tolist()],
+        n_results=5,
+        where=None,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    return (_unwrap(res))
+
+
 @server.tool()
 def find_similar_food_images(query_image: str):
     """
@@ -98,8 +152,7 @@ def find_similar_food_images(query_image: str):
         query_image: Absolute local file path to the query image (e.g. "/home/user/images/pizza.jpg"). Not base64 and not a description.
 
     Returns:
-        A dict with parallel lists: "ids", "documents", "metadatas", "distances".
-        Lower distance means more similar.
+        A dict with parallel lists: "ids", "documents", "metadatas", "distances". Lower distance means more similar.
     """
 
     chromadb = Chroma(
