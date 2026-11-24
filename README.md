@@ -143,9 +143,9 @@ python "~/<prefix_path>/<project_name>/Repo/mcp_servers/retrieval_server.py"
 ```
 
 ### 5.2. Run the (MCP) Host application
-Run the script `host_app.py`:<br>
+Run the script `host_app.py`, passing the retrieval server's port, `127.0.0.1:8080`, and the roots directory (default set to `./`):<br>
 <br>
 **Command `[Command Prompt]`:**
 ```
-python "~/<prefix_path>/<project_name>/Repo/host_app.py"
+python "~/<prefix_path>/<project_name>/Repo/host_app.py" "http://127.0.0.1:8080" "./"
 ```
