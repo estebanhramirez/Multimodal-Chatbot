@@ -86,14 +86,20 @@ server = FastMCP(name="Retrieval_server", instructions="Server for retrieval of 
 # --------------------------------------------- MCP tools -----------------------------------------------------
  
 @server.tool()
-def retrieve_recipe_from_image(query_image: str):
+def find_similar_food_images(query_image: str):
     """
-    Retrieve recipe details based on a query image (with optional metadata filtering).
+    Find food images in the database that are visually similar to a given image,
+    and return their stored descriptions and metadata (e.g. dish name, source).
+
+    Use this tool whenever the user provides a food image (or an image file path)
+    and wants to identify the dish, find ingredients, or look up other details about it.
 
     Args:
-        query_image (str): the query image.
+        query_image: Absolute local file path to the query image (e.g. "/home/user/images/pizza.jpg"). Not base64 and not a description.
+
     Returns:
-        Tuple[List]: ids, docs, metas, dists
+        A dict with parallel lists: "ids", "documents", "metadatas", "distances".
+        Lower distance means more similar.
     """
 
     chromadb = Chroma(

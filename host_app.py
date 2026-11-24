@@ -39,12 +39,12 @@ class App():
 
         self.client = None
 
-        self.llm = ChatOllama(model="phi4-mini:3.8b", base_url="http://127.0.0.1:11434")
+        self.llm = ChatOllama(model="qwen3-vl:4b", base_url="http://127.0.0.1:11434")
 
     # MCP Host — ReAct Agent Loop
     async def chat_with_agent(self, user_message: str, history: list) -> str:
         mcp_tools = await self.client.list_tools()
-        print(mcp_tools)
+
         # Convert MCP tool schemas to OpenAI-style tool definitions for the LLM
         openai_tools = [
             {
@@ -74,6 +74,7 @@ class App():
         # ReAct loop — call tools until the LLM returns a plain text reply
         for _ in range(10):
             response = await model.ainvoke(messages)
+            print(f"MODEL RESPONSE: {response}")
             messages.append(response)
 
             # No tool calls means the LLM is done — return the final response
@@ -88,7 +89,9 @@ class App():
 
             # Execute each tool call via the MCP server and feed results back
             for tool_call in response.tool_calls:
+                print(f"TOOL CALL: \nname: {tool_call["name"]}\n args:{tool_call["args"]}\n")
                 result = await self.client.call_tool(tool_call["name"], tool_call["args"])
+                print(f"TOOL CALL RESULT: {result}")
                 tool_output = " ".join(
                     item.text if hasattr(item, "text") else str(item)
                     for item in result.content
@@ -118,7 +121,7 @@ class App():
     async def process_user_request(self, user_message, history, image_input):
         if image_input:
             history = history + [
-                {"role": "user", "content": f"The user input the Image: {image_input}"},
+                {"role": "user", "content": f"The user input the Image: {image_input}."},
             ]
 
         async for update in self.handle_chat(user_message, history):

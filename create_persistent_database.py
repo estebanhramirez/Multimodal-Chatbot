@@ -57,7 +57,6 @@ def main():
 
     print(f"✅ Loaded recipes:     {len(recipes)}")
 
-
     IMG_DIR  = "../Data/recipe_images"
     image_paths = sorted(glob.glob(f"{IMG_DIR}/**/*.png", recursive=True))
     print(f"✅ Images found: {len(image_paths)}")
@@ -73,13 +72,16 @@ def main():
         image_docs.append(
             Document(
                 # keeps retrieval results readable
-                page_content=rec.get("name", f"recipe image {i}"),
+                page_content=rec.get("image_description", f"description image {i}"),
                 metadata={
                     "doc_id": doc_id,
                     "image_path": p,
-                    "source": "recipe_image",
-                    "recipe_id": rec.get("id"),
-                    "cuisine": rec.get("cuisine"),
+                    "name": rec.get("name"),
+                    "directions": rec.get("directions"),
+                    "ingredients": rec.get("ingredients"),
+                    "prep_time": rec.get("prep_time"),
+                    "cook_time": rec.get("cook_time"),
+                    "servings": rec.get("servings")
                 },
             )
         )
