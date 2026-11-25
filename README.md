@@ -151,3 +151,13 @@ Run the script `host_app.py`, passing the retrieval server's port, `127.0.0.1:80
 ```
 python "~/<prefix_path>/<project_name>/Repo/host_app.py" "http://127.0.0.1:8080" "./"
 ```
+
+<br>
+<br>
+<br>
+<br>
+
+# Appendix
+Model Context Protocol (MCP) lifecycle:
+
+![MCP_lifecycle](readme/MCP_lifecycle.jpeg)
